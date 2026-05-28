@@ -1,0 +1,14 @@
+ 
+fredapi
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+xgboost
+statsmodels
+shap
+streamlit
+joblib
+jupyter
+python-dotenv

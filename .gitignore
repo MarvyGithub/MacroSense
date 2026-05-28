@@ -1,0 +1,20 @@
+ 
+# API Keys and secrets
+.env
+
+# Data files (too large for GitHub)
+data/
+
+# Saved models (too large for GitHub)
+outputs/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
