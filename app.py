@@ -1048,8 +1048,8 @@ col1, col2 = st.columns(2)
 
 col1.markdown("""
 **Connect With Me**
-- LinkedIn: [LinkedIn URL](https://www.linkedin.com/in/gideon-marvelous-5a19b919b?utm_source=share_via&utm_content=profile&utm_medium=member_android)
-- GitHub: [GitHub URL](https://github.com/MarvyGithub)
+- LinkedIn: [Aremu Gideon Marvelous](https://www.linkedin.com/in/gideon-marvelous-5a19b919b?utm_source=share_via&utm_content=profile&utm_medium=member_android)
+- GitHub: [Marvy](https://github.com/MarvyGithub)
 - Email: aremumarvelous@gmail.com
 """)
 
