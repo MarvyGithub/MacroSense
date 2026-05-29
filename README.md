@@ -198,7 +198,7 @@ streamlit run app.py
 
 Live Dashboard
 
-[Link to your Streamlit deployment goes here]
+[https://macrosense-bom2fdzvmhjadygcxdpduw.streamlit.app/]
 
 Tech Stack:
 
@@ -214,4 +214,4 @@ Economics graduate applying machine learning to macroeconomic forecasting.
 This project combines domain knowledge from economics
 training with ML engineering to produce a system that
 is both technically rigorous and economically interpretable.
-Connect on LinkedIn: [Your LinkedIn URL]
+Connect on LinkedIn: [https://www.linkedin.com/in/gideon-marvelous-5a19b919b?utm_source=share_via&utm_content=profile&utm_medium=member_android]
