@@ -52,12 +52,13 @@ st.set_page_config(
 
 # ------------------------------------------------
 # SECTION 3: LOAD API KEY
-# Reads your FRED API key from the .env file
-# locally or from Streamlit Cloud secrets
-# when deployed online
+# Tries local .env file first for development
+# then falls back to Streamlit Cloud secrets
+# for deployment. Same code works in both places.
 # ------------------------------------------------
+
 # Get the folder where app.py lives
-app_dir = os.path.dirname(os.path.abspath(__file__))
+app_dir  = os.path.dirname(os.path.abspath(__file__))
 
 # Build explicit path to .env file
 env_path = os.path.join(app_dir, '.env')
@@ -65,15 +66,23 @@ env_path = os.path.join(app_dir, '.env')
 # Load the .env file from that explicit path
 load_dotenv(dotenv_path=env_path)
 
-# Get the API key
+# Try getting key from local .env file first
 api_key = os.getenv('FRED_API_KEY')
 
-# Safety check -- stop immediately if key not found
+# If not found locally try Streamlit Cloud secrets
+if api_key is None:
+    try:
+        api_key = st.secrets['FRED_API_KEY']
+    except Exception:
+        api_key = None
+
+# Stop the app if key is still not found
 if api_key is None:
     st.error(
-        "FRED API key not found. Please check that "
-        "your .env file exists in the MacroSense folder "
-        "and contains: FRED_API_KEY=your_key_here"
+        "FRED API key not found. "
+        "If running locally check your .env file. "
+        "If running on Streamlit Cloud add your key "
+        "under Settings then Secrets."
     )
     st.stop()
 
