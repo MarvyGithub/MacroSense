@@ -975,7 +975,7 @@ elif page == "About This Project":
     st.markdown("---")
 
     st.subheader("Honest Limitations")
-
+    
     st.warning("""
     1. Novel shocks -- no model trained on historical
        patterns can predict unprecedented events like
