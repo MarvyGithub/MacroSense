@@ -1061,23 +1061,23 @@ col2.markdown("""
   financial ML, time series analysis, Deep Learning, AI
 """)
     
-    st.markdown("""
-    This project was built as a portfolio
-    demonstration of applied machine learning
-    in macroeconomic forecasting. It combines
-    economics domain knowledge with machine
-    learning engineering to produce a system
-    that is both technically rigorous and
-    economically interpretable.
+st.markdown("""
+This project was built as a portfolio
+demonstration of applied machine learning
+in macroeconomic forecasting. It combines
+economics domain knowledge with machine
+learning engineering to produce a system
+that is both technically rigorous and
+economically interpretable.
 
-    The complete source code, notebooks, and
-    documentation are available on GitHub.
-    """)
+The complete source code, notebooks, and
+documentation are available on GitHub.
+""")
 
-    st.caption(
-        "MacroSense is for research and educational "
-        "purposes only. Not financial advice."
-    )
+st.caption(
+    "MacroSense is for research and educational "
+    "purposes only. Not financial advice."
+)
 
 # ------------------------------------------------
 # END OF APP
