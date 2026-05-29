@@ -1021,6 +1021,46 @@ elif page == "About This Project":
     st.markdown("---")
 
     st.subheader("Built By")
+
+st.markdown("""
+Aremu Gideon Marvelous
+
+I am an Economics graduate with a strong interest in 
+applying machine learning to real-world economic and 
+financial problems. I am currently preparing for a 
+Masters in Statistics where I plan to deepen my 
+expertise in statistical modelling and data science.
+
+MacroSense reflects my belief that economics domain 
+knowledge and machine learning are most powerful when 
+combined. Understanding why the yield curve inverts 
+before recessions, why unemployment lags behind GDP, 
+and why consumer sentiment leads economic downturns 
+is what separates a meaningful forecasting system 
+from a pure algorithmic exercise.
+
+I am actively seeking data science roles where I can 
+apply this combination of economic intuition and 
+technical skills to solve problems that matter.
+""")
+
+col1, col2 = st.columns(2)
+
+col1.markdown("""
+**Connect With Me**
+- LinkedIn: [Your LinkedIn URL](your linkedin url here)
+- GitHub: [Your GitHub URL](your github url here)
+- Email: your.email@gmail.com
+""")
+
+col2.markdown("""
+**Background**
+- BSc Economics -- University of Ilorin, Ilorin, Nigeria
+- Masters in Statistics -- Incoming
+- Interests: Macroeconomic forecasting, 
+  financial ML, time series analysis, Deep Learning, AI
+""")
+    
     st.markdown("""
     This project was built as a portfolio
     demonstration of applied machine learning
