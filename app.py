@@ -3,6 +3,11 @@
 # Run with: streamlit run app.py
 # ================================================
 
+# ------------------------------------------------
+# SECTION 1: IMPORT ALL LIBRARIES
+# This must always be at the very top of the file
+# before anything else runs
+# ------------------------------------------------
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,15 +15,18 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import joblib
 import os
-from fredapi import Fred
-from dotenv import load_dotenv
-from xgboost import XGBRegressor
 import warnings
 
 warnings.filterwarnings('ignore')
 
+from xgboost import XGBRegressor
+from fredapi import Fred
+from dotenv import load_dotenv
+
 # ------------------------------------------------
-# Page Configuration
+# SECTION 2: PAGE CONFIGURATION
+# This must be the first Streamlit command
+# that runs -- before any other st. command
 # ------------------------------------------------
 st.set_page_config(
     page_title="MacroSense -- US Economic Forecaster",
@@ -28,108 +36,287 @@ st.set_page_config(
 )
 
 # ------------------------------------------------
-# Load API Key and Connect to FRED
+# SECTION 3: LOAD API KEY
+# Reads your FRED API key from the .env file
+# locally or from Streamlit Cloud secrets
+# when deployed online
 # ------------------------------------------------
-load_dotenv()
+# Get the folder where app.py lives
+app_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Build explicit path to .env file
+env_path = os.path.join(app_dir, '.env')
+
+# Load the .env file from that explicit path
+load_dotenv(dotenv_path=env_path)
+
+# Get the API key
 api_key = os.getenv('FRED_API_KEY')
 
-@st.cache_data
-def load_data():
-    """Load our featured dataset from disk"""
-    fe = pd.read_csv('data/featured_fred_data.csv',
-                      index_col=0,
-                      parse_dates=True)
-    return fe
-
-@st.cache_data
-def load_walkforward_results():
-    """Load walk forward validation results"""
-    return pd.read_csv('outputs/walkforward_results.csv',
-                        header=[0, 1],
-                        index_col=0,
-                        parse_dates=True)
-
-@st.cache_data
-def load_raw_data():
-    """Load cleaned raw data for historical charts"""
-    return pd.read_csv('data/cleaned_fred_data.csv',
-                        index_col=0,
-                        parse_dates=True)
-
-@st.cache_resource
-def load_models():
-    """Load all trained XGBoost models"""
-    targets = ['target_GDP',
-               'target_Inflation',
-               'target_Unemployment']
-    models = {}
-    for t in targets:
-        path = f'outputs/XGBoost_{t}.pkl'
-        if os.path.exists(path):
-            models[t] = joblib.load(path)
-    return models
-
-@st.cache_resource
-def load_scaler():
-    return joblib.load('outputs/scaler.pkl')
+# Safety check -- stop immediately if key not found
+if api_key is None:
+    st.error(
+        "FRED API key not found. Please check that "
+        "your .env file exists in the MacroSense folder "
+        "and contains: FRED_API_KEY=your_key_here"
+    )
+    st.stop()
 
 # ------------------------------------------------
-# Helper -- Recession Shading
+# SECTION 4: DATA GENERATION FUNCTIONS
+# These functions download data from FRED,
+# engineer features, and train models.
+# The @st.cache_data decorator means each
+# function only runs once then stores the
+# result in memory for the rest of the session.
+# Without caching the app would re-download
+# data and retrain models on every single
+# user interaction which would be very slow.
 # ------------------------------------------------
+
 @st.cache_data
 def get_recession_data():
+    """
+    Downloads the official US recession indicator
+    from FRED. Returns 1 during recession months
+    and 0 during normal months.
+    Used to shade recession periods grey on charts.
+    """
     fred      = Fred(api_key=api_key)
     recession = fred.get_series('USREC')
     recession = recession.resample('ME').last()
     return recession
 
-def add_recession_shading(ax, recession, 
+
+@st.cache_data
+def generate_raw_data():
+    """
+    Downloads all 10 economic series from FRED,
+    combines them into one monthly table,
+    trims to 1992 where all series are available,
+    forward fills GDP quarterly gaps,
+    and drops genuinely missing rows at the end.
+    Returns the cleaned raw dataframe.
+    """
+    fred = Fred(api_key=api_key)
+
+    # Download all 10 series
+    gdp          = fred.get_series('GDPC1')
+    cpi          = fred.get_series('CPIAUCSL')
+    unemployment = fred.get_series('UNRATE')
+    fedfunds     = fred.get_series('FEDFUNDS')
+    m2           = fred.get_series('M2SL')
+    yieldcurve   = fred.get_series('T10Y2Y')
+    indpro       = fred.get_series('INDPRO')
+    retailsales  = fred.get_series('RSAFS')
+    sentiment    = fred.get_series('UMCSENT')
+    claims       = fred.get_series('ICSA')
+
+    # Combine into one master table
+    raw = pd.DataFrame({
+        'GDP'          : gdp,
+        'CPI'          : cpi,
+        'Unemployment' : unemployment,
+        'FedFunds'     : fedfunds,
+        'M2'           : m2,
+        'YieldCurve'   : yieldcurve,
+        'IndPro'       : indpro,
+        'RetailSales'  : retailsales,
+        'Sentiment'    : sentiment,
+        'JoblessClaims': claims
+    })
+
+    # Align everything to monthly frequency
+    raw = raw.resample('ME').last()
+
+    # Trim to 1992 where all series are available
+    raw = raw[raw.index >= '1992-01-01']
+
+    # Forward fill quarterly GDP gaps
+    raw = raw.ffill()
+
+    # Drop rows that are still missing
+    raw = raw.dropna()
+
+    return raw
+
+
+@st.cache_data
+def generate_features(_raw):
+    """
+    Transforms raw FRED data into machine learning
+    ready features. Converts level variables to
+    growth rates, creates lag features to give
+    the model memory of past conditions, and
+    shifts target variables 6 months forward
+    so the model learns to predict the future.
+
+    The underscore before _raw tells Streamlit
+    not to try to hash this argument for caching
+    since dataframes can be large.
+    """
+    fe = pd.DataFrame(index=_raw.index)
+
+    # Growth rate transformations
+    fe['GDP_growth']          = _raw['GDP'].pct_change(4) * 100
+    fe['Inflation_yoy']       = _raw['CPI'].pct_change(12) * 100
+    fe['Inflation_mom']       = _raw['CPI'].pct_change(1) * 100
+    fe['Unemployment']        = _raw['Unemployment']
+    fe['Unemp_change_3m']     = _raw['Unemployment'].diff(3)
+    fe['Unemp_change_12m']    = _raw['Unemployment'].diff(12)
+    fe['FedFunds']            = _raw['FedFunds']
+    fe['FedFunds_change_6m']  = _raw['FedFunds'].diff(6)
+    fe['YieldCurve']          = _raw['YieldCurve']
+    fe['YieldCurve_change']   = _raw['YieldCurve'].diff(3)
+    fe['Yield_inverted']      = (_raw['YieldCurve'] < 0).astype(int)
+    fe['M2_growth']           = _raw['M2'].pct_change(12) * 100
+    fe['IndPro_growth']       = _raw['IndPro'].pct_change(12) * 100
+    fe['IndPro_growth_3m']    = _raw['IndPro'].pct_change(3) * 100
+    fe['Retail_growth']       = _raw['RetailSales'].pct_change(12) * 100
+    fe['Sentiment']           = _raw['Sentiment']
+    fe['Sentiment_change_6m'] = _raw['Sentiment'].diff(6)
+    fe['Claims_growth']       = _raw['JoblessClaims'].pct_change(12) * 100
+
+    # Lag features -- gives the model memory of past conditions
+    cols_to_lag = [
+        'GDP_growth', 'Inflation_yoy', 'Unemployment',
+        'FedFunds', 'YieldCurve', 'M2_growth',
+        'IndPro_growth', 'Retail_growth', 'Sentiment',
+        'Claims_growth', 'Yield_inverted',
+        'FedFunds_change_6m', 'Unemp_change_3m',
+        'Sentiment_change_6m'
+    ]
+
+    for col in cols_to_lag:
+        for lag in [1, 3, 6, 12]:
+            fe[f'{col}_lag{lag}'] = fe[col].shift(lag)
+
+    # Target variables shifted 6 months forward
+    fe['target_GDP']          = fe['GDP_growth'].shift(-6)
+    fe['target_Inflation']    = fe['Inflation_yoy'].shift(-6)
+    fe['target_Unemployment'] = fe['Unemployment'].shift(-6)
+
+    # Drop rows with missing values
+    fe_clean = fe.dropna()
+
+    return fe_clean
+
+
+@st.cache_resource
+def train_models(_fe_clean):
+    """
+    Trains one XGBoost model for each of the
+    three target variables using all available
+    feature engineered data.
+
+    In deployment we train on all available data
+    rather than splitting into train and test
+    because we want the model to learn from
+    as much history as possible before forecasting.
+
+    The @st.cache_resource decorator is used
+    instead of @st.cache_data for models because
+    models are objects not data -- cache_resource
+    handles them more efficiently.
+    """
+    target_cols  = ['target_GDP',
+                    'target_Inflation',
+                    'target_Unemployment']
+    feature_cols = [c for c in _fe_clean.columns
+                    if c not in target_cols]
+
+    X = _fe_clean[feature_cols]
+    y = _fe_clean[target_cols]
+
+    models = {}
+
+    for target in target_cols:
+        model = XGBRegressor(
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=4,
+            random_state=42,
+            verbosity=0
+        )
+        model.fit(X, y[target])
+        models[target] = model
+
+    return models, feature_cols
+
+# ------------------------------------------------
+# SECTION 5: HELPER FUNCTIONS
+# Small reusable functions used across
+# multiple pages of the dashboard
+# ------------------------------------------------
+
+def add_recession_shading(ax, recession,
                            start_date, end_date):
+    """
+    Adds grey shading to a matplotlib chart
+    during every official US recession period
+    between start_date and end_date.
+    """
     rec = recession[
         (recession.index >= start_date) &
         (recession.index <= end_date)
     ]
+
     in_recession = False
-    start = None
+    start        = None
+
     for date, val in rec.items():
         if val == 1 and not in_recession:
-            start = date
+            start        = date
             in_recession = True
         elif val == 0 and in_recession:
             ax.axvspan(start, date,
                       alpha=0.2, color='grey')
             in_recession = False
 
-# ------------------------------------------------
-# Load Everything
-# ------------------------------------------------
-fe_clean  = load_data()
-raw_data  = load_raw_data()
-models    = load_models()
-scaler    = load_scaler()
-recession = get_recession_data()
-
-target_cols  = ['target_GDP',
-                'target_Inflation',
-                'target_Unemployment']
-feature_cols = [c for c in fe_clean.columns
-                if c not in target_cols]
-
-X = fe_clean[feature_cols]
-y = fe_clean[target_cols]
 
 # ------------------------------------------------
-# Sidebar
+# SECTION 6: LOAD AND GENERATE EVERYTHING
+# This section runs when the app first loads.
+# The spinner shows a loading message to the
+# user while data is being downloaded from
+# FRED and models are being trained.
+# This only happens once per session because
+# of the caching decorators above.
 # ------------------------------------------------
-st.sidebar.image(
-    "https://upload.wikimedia.org/wikipedia/commons/"
-    "thumb/8/8a/Wikimedia_Foundation_logo_-_vertical.svg/"
-    "402px-Wikimedia_Foundation_logo_-_vertical.svg.png",
-    width=50
+
+with st.spinner(
+    "Connecting to Federal Reserve database and "
+    "loading MacroSense... This takes about "
+    "60 seconds on first load."
+):
+    raw_data  = generate_raw_data()
+    fe_clean  = generate_features(raw_data)
+    recession = get_recession_data()
+    models, feature_cols = train_models(fe_clean)
+
+# Define target columns and display names
+target_cols = ['target_GDP',
+               'target_Inflation',
+               'target_Unemployment']
+
+target_display = {
+    'target_GDP'          : 'GDP Growth',
+    'target_Inflation'    : 'Inflation Rate',
+    'target_Unemployment' : 'Unemployment Rate'
+}
+
+# ------------------------------------------------
+# SECTION 7: SIDEBAR NAVIGATION
+# Everything written to st.sidebar appears
+# in the left panel of the dashboard.
+# The radio buttons let users switch between
+# the five pages of the app.
+# ------------------------------------------------
+
+st.sidebar.title("📈 MacroSense")
+st.sidebar.markdown(
+    "*US Economic Forecasting System*"
 )
-
-st.sidebar.title("MacroSense")
-st.sidebar.markdown("*US Economic Forecasting System*")
 st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
@@ -148,617 +335,602 @@ st.sidebar.markdown(
     "(https://fred.stlouisfed.org/)"
 )
 st.sidebar.markdown("**Forecast Horizon:** 6 months ahead")
-st.sidebar.markdown("**Primary Model:** XGBoost Ensemble")
-st.sidebar.markdown("**Data Coverage:** 1992 to present")
+st.sidebar.markdown("**Primary Model:** XGBoost")
+st.sidebar.markdown(
+    f"**Data Coverage:** "
+    f"{raw_data.index[0].strftime('%b %Y')} to "
+    f"{raw_data.index[-1].strftime('%b %Y')}"
+)
 
 # ------------------------------------------------
-# PAGE 1 -- OVERVIEW
+# SECTION 8: PAGE 1 -- OVERVIEW
+# Displays when user selects Overview
+# from the sidebar navigation
 # ------------------------------------------------
+
 if page == "Overview":
-    
+
     st.title("📈 MacroSense")
     st.subheader(
-        "A Machine Learning System for US Economic Forecasting"
+        "A Machine Learning System for "
+        "US Economic Forecasting"
     )
-    
+
     st.markdown("""
-    MacroSense uses 60 years of Federal Reserve data and 
-    machine learning to forecast three key US economic 
+    MacroSense uses Federal Reserve data and machine
+    learning to forecast three key US economic
     indicators **6 months into the future**.
-    
-    Most organisations make economic decisions based on 
-    what happened last quarter. MacroSense gives them a 
-    data-driven view of what is coming next.
+
+    Most organisations make economic decisions
+    reactively -- looking at what happened last
+    quarter and assuming the near future looks
+    similar. MacroSense provides a data-driven
+    forward-looking view so organisations can
+    prepare for what is coming rather than react
+    to what has already happened.
     """)
-    
+
     st.markdown("---")
-    
-    # Current snapshot
+
+    # Current economic snapshot
     st.subheader("Current Economic Snapshot")
-    
+
     col1, col2, col3 = st.columns(3)
-    
-    # GDP
-    gdp_current = raw_data['GDP'].dropna().iloc[-1]
-    gdp_prev    = raw_data['GDP'].dropna().iloc[-5]
-    gdp_growth  = ((gdp_current - gdp_prev) / 
+
+    # GDP growth rate
+    gdp_series  = raw_data['GDP'].dropna()
+    gdp_current = gdp_series.iloc[-1]
+    gdp_prev    = gdp_series.iloc[-5]
+    gdp_growth  = ((gdp_current - gdp_prev) /
                     gdp_prev * 100)
     col1.metric(
-        "Real GDP",
-        f"${gdp_current:,.0f}B",
-        f"{gdp_growth:+.1f}% vs 1yr ago"
+        label="Real GDP",
+        value=f"${gdp_current:,.0f}B",
+        delta=f"{gdp_growth:+.1f}% vs 1yr ago"
     )
-    
-    # Inflation
-    cpi_current = raw_data['CPI'].dropna().iloc[-1]
-    cpi_prev    = raw_data['CPI'].dropna().iloc[-13]
-    inflation   = ((cpi_current - cpi_prev) / 
-                    cpi_prev * 100)
+
+    # Inflation rate
+    cpi_series   = raw_data['CPI'].dropna()
+    cpi_current  = cpi_series.iloc[-1]
+    cpi_prev     = cpi_series.iloc[-13]
+    inflation    = ((cpi_current - cpi_prev) /
+                     cpi_prev * 100)
     col2.metric(
-        "Inflation Rate (YoY)",
-        f"{inflation:.1f}%",
-        f"{inflation - ((raw_data['CPI'].dropna().iloc[-13] - raw_data['CPI'].dropna().iloc[-25]) / raw_data['CPI'].dropna().iloc[-25] * 100):+.1f}% vs prior year"
+        label="Inflation Rate (YoY)",
+        value=f"{inflation:.1f}%",
+        delta=f"{inflation:+.1f}% annual rate"
     )
-    
+
     # Unemployment
-    unemp_current = raw_data['Unemployment'].dropna().iloc[-1]
-    unemp_prev    = raw_data['Unemployment'].dropna().iloc[-13]
+    unemp_series  = raw_data['Unemployment'].dropna()
+    unemp_current = unemp_series.iloc[-1]
+    unemp_prev    = unemp_series.iloc[-13]
+    unemp_delta   = unemp_current - unemp_prev
     col3.metric(
-        "Unemployment Rate",
-        f"{unemp_current:.1f}%",
-        f"{unemp_current - unemp_prev:+.1f}pp vs 1yr ago"
+        label="Unemployment Rate",
+        value=f"{unemp_current:.1f}%",
+        delta=f"{unemp_delta:+.1f}pp vs 1yr ago"
     )
-    
+
     st.markdown("---")
-    
+
     # What MacroSense predicts
     st.subheader("What MacroSense Predicts")
-    
+
     col1, col2, col3 = st.columns(3)
-    
+
     col1.info("""
     **GDP Growth Rate**
-    
-    Is the US economy growing or 
-    contracting? MacroSense forecasts 
-    the quarterly growth rate 6 months 
-    ahead so organisations can plan 
+
+    Is the US economy growing or contracting?
+    MacroSense forecasts the growth rate
+    6 months ahead so organisations can plan
     before conditions change.
     """)
-    
+
     col2.info("""
     **Inflation Rate**
-    
-    Are prices rising too fast? 
-    The 6-month ahead inflation forecast 
-    helps businesses anticipate cost 
-    pressures and pricing decisions 
-    before they materialise.
+
+    Are prices rising too fast? The 6-month
+    ahead inflation forecast helps businesses
+    anticipate cost pressures before they
+    materialise.
     """)
-    
+
     col3.info("""
     **Unemployment Rate**
-    
-    Is the labour market tightening 
-    or loosening? Forward visibility 
-    on unemployment helps with hiring 
-    plans, wage expectations, and 
-    workforce strategy.
+
+    Is the labour market tightening or loosening?
+    Forward visibility helps with hiring plans
+    and workforce strategy.
     """)
-    
+
     st.markdown("---")
-    
+
     # Performance summary
     st.subheader("System Performance")
-    
+
     col1, col2, col3 = st.columns(3)
-    col1.success("**GDP Direction Accuracy**\n\n# 88.9%")
-    col2.success("**Inflation Direction Accuracy**\n\n# 96.2%")
-    col3.success("**Unemployment Direction Accuracy**\n\n# 100%*")
-    
+    col1.success(
+        "**GDP Direction Accuracy**\n\n### 88.9%"
+    )
+    col2.success(
+        "**Inflation Direction Accuracy**\n\n### 96.2%"
+    )
+    col3.success(
+        "**Unemployment Direction Accuracy**\n\n### 100%"
+    )
+
     st.caption(
-        "* Unemployment direction accuracy reflects the "
-        "high persistence of this series. Unemployment "
-        "trends in one direction for extended periods "
-        "making directional prediction more straightforward "
-        "than for GDP or inflation."
+        "Direction accuracy measures how often MacroSense "
+        "correctly predicted whether each indicator would "
+        "move up or down over the following 6 months. "
+        "A random baseline would achieve 50%. "
+        "Unemployment accuracy reflects the high persistence "
+        "of this series rather than extraordinary model power."
     )
 
 # ------------------------------------------------
-# PAGE 2 -- ECONOMIC DASHBOARD
+# SECTION 9: PAGE 2 -- ECONOMIC DASHBOARD
+# Displays when user selects Economic Dashboard
+# Shows historical charts for all 10 variables
+# with recession shading
 # ------------------------------------------------
+
 elif page == "Economic Dashboard":
-    
+
     st.title("📊 Economic Dashboard")
     st.markdown(
-        "Historical trends for all 10 economic indicators "
-        "with recession periods shaded grey."
+        "Historical trends for all 10 economic "
+        "indicators with recession periods shaded grey."
     )
-    
+
+    # Dropdown to select which indicator to display
     indicator = st.selectbox(
         "Select Indicator",
         ["GDP", "CPI", "Unemployment", "FedFunds",
          "M2", "YieldCurve", "IndPro",
          "RetailSales", "Sentiment", "JoblessClaims"]
     )
-    
+
+    # Slider to control how many years to show
     years = st.slider(
         "Years of history to display",
         min_value=5,
-        max_value=34,
+        max_value=30,
         value=20
     )
-    
+
+    # Display labels for each indicator
     labels = {
-        "GDP"          : ("Real GDP", "Billions USD"),
-        "CPI"          : ("Consumer Price Index", "Index"),
-        "Unemployment" : ("Unemployment Rate", "%"),
-        "FedFunds"     : ("Federal Funds Rate", "%"),
-        "M2"           : ("Money Supply M2", "Billions USD"),
-        "YieldCurve"   : ("Yield Curve Spread", "% Points"),
-        "IndPro"       : ("Industrial Production", "Index"),
-        "RetailSales"  : ("Retail Sales", "Millions USD"),
-        "Sentiment"    : ("Consumer Sentiment", "Index"),
-        "JoblessClaims": ("Weekly Jobless Claims", "People")
+        "GDP"          : ("Real GDP",
+                          "Billions USD"),
+        "CPI"          : ("Consumer Price Index",
+                          "Index"),
+        "Unemployment" : ("Unemployment Rate",
+                          "%"),
+        "FedFunds"     : ("Federal Funds Rate",
+                          "%"),
+        "M2"           : ("Money Supply M2",
+                          "Billions USD"),
+        "YieldCurve"   : ("Yield Curve Spread",
+                          "Percentage Points"),
+        "IndPro"       : ("Industrial Production",
+                          "Index"),
+        "RetailSales"  : ("Retail Sales",
+                          "Millions USD"),
+        "Sentiment"    : ("Consumer Sentiment",
+                          "Index"),
+        "JoblessClaims": ("Weekly Jobless Claims",
+                          "Number of People")
     }
-    
+
     title, ylabel = labels[indicator]
-    
+
+    # Filter series to selected time window
     series = raw_data[indicator].dropna()
-    cutoff = series.index[-1] - pd.DateOffset(years=years)
+    cutoff = series.index[-1] - pd.DateOffset(
+        years=years
+    )
     series = series[series.index >= cutoff]
-    
+
+    # Plot the chart
     fig, ax = plt.subplots(figsize=(12, 4))
-    
+
     add_recession_shading(
         ax, recession,
         series.index[0],
         series.index[-1]
     )
-    
+
     ax.plot(series.index, series.values,
             color='steelblue', linewidth=1.8)
-    ax.set_title(title, fontsize=13, 
+    ax.set_title(title, fontsize=13,
                   fontweight='bold')
     ax.set_ylabel(ylabel)
     ax.set_xlabel('Date')
     ax.grid(alpha=0.3)
-    
+
     grey_patch = mpatches.Patch(
-        color='grey', alpha=0.2, label='Recession'
+        color='grey', alpha=0.2,
+        label='Recession'
     )
     ax.legend(handles=[grey_patch], fontsize=9)
     plt.tight_layout()
-    
     st.pyplot(fig)
-    
-    # Indicator description
+
+    # Plain English description of each indicator
     descriptions = {
-        "GDP": "Real GDP measures the total value of all goods and services produced in the US adjusted for inflation. It is the broadest measure of economic health.",
-        "CPI": "The Consumer Price Index tracks how much everyday goods and services cost over time. Year over year change gives us the inflation rate.",
-        "Unemployment": "The unemployment rate measures the percentage of working age people actively looking for work but unable to find it.",
-        "FedFunds": "The Federal Funds Rate is set by the Federal Reserve and influences borrowing costs throughout the entire economy.",
-        "M2": "M2 measures the total amount of money circulating in the US economy including cash and bank deposits.",
-        "YieldCurve": "The yield curve spread is the difference between 10-year and 2-year Treasury rates. When it goes negative it has preceded every US recession since 1976.",
-        "IndPro": "Industrial Production measures output from factories, mines, and utilities. It tends to fall before recessions as businesses anticipate slowing demand.",
-        "RetailSales": "Retail sales measure consumer spending which drives roughly 70% of US GDP.",
-        "Sentiment": "The University of Michigan Consumer Sentiment Index measures how optimistic Americans feel about economic conditions.",
-        "JoblessClaims": "Weekly initial jobless claims measure how many people filed for unemployment benefits that week -- one of the most timely economic indicators available."
+        "GDP"         : "Real GDP measures the total value of all goods and services produced in the US adjusted for inflation. It is the broadest measure of economic health. When GDP grows the economy is expanding. When it shrinks the economy is in recession.",
+        "CPI"         : "The Consumer Price Index tracks how much everyday goods and services cost over time. Year over year change gives us the inflation rate. The Federal Reserve targets roughly 2% annual inflation.",
+        "Unemployment": "The unemployment rate measures the percentage of working age people actively looking for work but unable to find it. It is a lagging indicator -- it rises after recessions begin not before.",
+        "FedFunds"    : "The Federal Funds Rate is set by the Federal Reserve and controls the cost of borrowing throughout the economy. The Fed raises rates to cool inflation and cuts them to stimulate growth.",
+        "M2"          : "M2 measures the total amount of money circulating in the US economy. Rapid M2 growth often precedes inflation as too much money chases too few goods.",
+        "YieldCurve"  : "The yield curve spread is the difference between 10-year and 2-year Treasury interest rates. When it goes negative -- called inversion -- it has preceded every US recession since 1976 without exception.",
+        "IndPro"      : "Industrial Production measures output from US factories, mines, and utilities. It tends to fall before recessions as businesses anticipate slowing demand and cut production early.",
+        "RetailSales" : "Retail sales measure consumer spending which drives roughly 70% of US GDP. When consumers stop spending GDP almost always follows downward.",
+        "Sentiment"   : "The University of Michigan Consumer Sentiment Index measures how optimistic Americans feel about economic conditions. It is a leading indicator -- it falls before recessions begin as people sense trouble coming.",
+        "JoblessClaims": "Weekly initial jobless claims measure how many people filed for unemployment benefits that week. It is the most timely labour market indicator available -- released every Thursday and reacting within weeks of economic conditions changing."
     }
-    
+
     st.info(descriptions[indicator])
 
 # ------------------------------------------------
-# PAGE 3 -- MODEL FORECASTS
+# SECTION 10: PAGE 3 -- MODEL FORECASTS
+# Displays when user selects Model Forecasts
+# Shows MacroSense 6-month ahead predictions
+# using the most recent available FRED data
 # ------------------------------------------------
+
 elif page == "Model Forecasts":
-    
+
     st.title("🔮 MacroSense Forecasts")
     st.markdown(
-        "6-month ahead forecasts generated by MacroSense "
-        "using the most recent available FRED data."
+        "6-month ahead forecasts generated from "
+        "the most recent available Federal Reserve data."
     )
-    
-    st.markdown("---")
-    
-    if len(models) < 3:
-        st.warning(
-            "Some model files were not found. "
-            "Please ensure all notebooks have been "
-            "run successfully before using this page."
-        )
-    else:
-        # Get most recent features
-        latest_features = X.iloc[[-1]]
-        latest_date     = X.index[-1]
-        
-        forecast_date = latest_date + pd.DateOffset(months=6)
-        
-        st.info(
-            f"Forecasts based on data up to: "
-            f"**{latest_date.strftime('%B %Y')}**  "
-            f"Predicting conditions in: "
-            f"**{forecast_date.strftime('%B %Y')}**"
-        )
-        
-        col1, col2, col3 = st.columns(3)
-        
-        target_info = {
-            'target_GDP': {
-                'name'  : 'GDP Growth Rate',
-                'unit'  : '%',
-                'col'   : col1,
-                'color' : 'steelblue'
-            },
-            'target_Inflation': {
-                'name'  : 'Inflation Rate',
-                'unit'  : '%',
-                'col'   : col2,
-                'color' : 'crimson'
-            },
-            'target_Unemployment': {
-                'name'  : 'Unemployment Rate',
-                'unit'  : '%',
-                'col'   : col3,
-                'color' : 'darkorange'
-            }
-        }
-        
-        forecasts = {}
-        
-        for target, info in target_info.items():
-            if target in models:
-                pred = models[target].predict(
-                    latest_features
-                )[0]
-                forecasts[target] = pred
-                
-                # Current actual value
-                current = y[target].dropna().iloc[-7]
-                delta   = pred - current
-                
-                info['col'].metric(
-                    label=f"{info['name']} Forecast",
-                    value=f"{pred:.2f}{info['unit']}",
-                    delta=f"{delta:+.2f}{info['unit']} vs current"
-                )
-        
-        st.markdown("---")
-        
-        # Historical context chart
-        st.subheader("Forecast in Historical Context")
-        
-        target_choice = st.selectbox(
-            "Select indicator for detailed view",
-            ["GDP Growth Rate",
-             "Inflation Rate",
-             "Unemployment Rate"]
-        )
-        
-        target_map = {
-            "GDP Growth Rate"   : 'target_GDP',
-            "Inflation Rate"    : 'target_Inflation',
-            "Unemployment Rate" : 'target_Unemployment'
-        }
-        
-        feat_map = {
-            "GDP Growth Rate"   : 'GDP_growth',
-            "Inflation Rate"    : 'Inflation_yoy',
-            "Unemployment Rate" : 'Unemployment'
-        }
-        
-        selected_target = target_map[target_choice]
-        selected_feat   = feat_map[target_choice]
-        
-        if selected_feat in fe_clean.columns:
-            historical = fe_clean[selected_feat].iloc[-60:]
-            
-            fig, ax = plt.subplots(figsize=(12, 4))
-            
-            add_recession_shading(
-                ax, recession,
-                historical.index[0],
-                historical.index[-1]
-            )
-            
-            ax.plot(historical.index,
-                    historical.values,
-                    color='steelblue',
-                    linewidth=1.8,
-                    label='Historical')
-            
-            if selected_target in forecasts:
-                ax.scatter(
-                    [forecast_date],
-                    [forecasts[selected_target]],
-                    color='crimson',
-                    s=150,
-                    zorder=5,
-                    label=f'MacroSense Forecast ({forecast_date.strftime("%b %Y")})'
-                )
-                ax.axvline(
-                    latest_date,
-                    color='grey',
-                    linewidth=1,
-                    linestyle='--',
-                    alpha=0.7,
-                    label='Latest data point'
-                )
-            
-            ax.set_title(
-                f'{target_choice} -- Last 5 Years + Forecast',
-                fontweight='bold'
-            )
-            ax.set_ylabel(f'{target_choice} (%)')
-            ax.set_xlabel('Date')
-            ax.legend(fontsize=9)
-            ax.grid(alpha=0.3)
-            plt.tight_layout()
-            
-            st.pyplot(fig)
-        
-        st.markdown("---")
-        st.subheader("Important Disclaimer")
-        st.warning(
-            "MacroSense forecasts are generated by machine "
-            "learning models trained on historical data. "
-            "They are intended as one input into economic "
-            "analysis and decision making -- not as "
-            "definitive predictions. Economic conditions "
-            "can change rapidly due to unforeseen events "
-            "that no historical model can anticipate. "
-            "Always combine quantitative forecasts with "
-            "qualitative judgment and domain expertise."
-        )
 
-# ------------------------------------------------
-# PAGE 4 -- WALK FORWARD VALIDATION
-# ------------------------------------------------
-elif page == "Walk Forward Validation":
-    
-    st.title("🔄 Walk Forward Validation")
-    st.markdown("""
-    Walk forward validation simulates MacroSense running 
-    live from the late 1990s onward. Every month a forecast 
-    is made using only data genuinely available at that 
-    moment. The results show how the system would have 
-    performed under real world conditions across three 
-    decades of economic history including two major 
-    recessions and a global pandemic.
-    """)
-    
     st.markdown("---")
-    
-    # Performance metrics
-    st.subheader("Overall Performance")
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("GDP Direction Accuracy",    "88.9%")
-    col2.metric("Inflation Direction Accuracy", "96.2%")
-    col3.metric("Unemployment Direction Accuracy", "100%")
-    
-    st.caption(
-        "Direction accuracy measures how often MacroSense "
-        "correctly predicted whether each indicator would "
-        "move up or down over the following 6 months. "
-        "A random baseline would achieve 50%."
+
+    # Get the most recent row of features
+    # This is what the model uses to predict
+    X_all        = fe_clean[feature_cols]
+    latest_row   = X_all.iloc[[-1]]
+    latest_date  = X_all.index[-1]
+    forecast_date = (latest_date +
+                     pd.DateOffset(months=6))
+
+    st.info(
+        f"Forecasts based on data available up to: "
+        f"**{latest_date.strftime('%B %Y')}**   "
+        f"Predicting conditions in: "
+        f"**{forecast_date.strftime('%B %Y')}**"
     )
-    
+
     st.markdown("---")
-    
-    # Performance breakdown
-    st.subheader("Performance Breakdown")
-    
-    breakdown = pd.DataFrame({
-        'Indicator'       : ['GDP Growth',
-                             'Inflation Rate',
-                             'Unemployment Rate'],
-        'Overall'         : ['88.9%', '96.2%', '100.0%'],
-        'During Recessions': ['70.0%', '70.0%', '100.0%'],
-        'Normal Periods'  : ['90.5%', '98.3%', '100.0%'],
-        'Pre 2010'        : ['88.9%', '91.7%', '100.0%'],
-        'Post 2010'       : ['88.9%', '97.9%', '100.0%']
-    })
-    
-    st.dataframe(breakdown, use_container_width=True)
-    
+    st.subheader("6-Month Ahead Forecasts")
+
+    col1, col2, col3 = st.columns(3)
+
+    target_cols_display = {
+        'target_GDP'          : ('GDP Growth Rate',   col1),
+        'target_Inflation'    : ('Inflation Rate',    col2),
+        'target_Unemployment' : ('Unemployment Rate', col3)
+    }
+
+    forecasts = {}
+
+    for target, (name, col) in \
+            target_cols_display.items():
+
+        if target in models:
+            pred = models[target].predict(
+                latest_row
+            )[0]
+            forecasts[target] = pred
+
+            col.metric(
+                label=f"{name} -- 6 Month Forecast",
+                value=f"{pred:.2f}%"
+            )
+
     st.markdown("---")
-    
-    # Walk forward charts
-    st.subheader("Actual vs Predicted Over Time")
-    
+
+    # Historical context chart
+    st.subheader("Forecast In Historical Context")
+    st.markdown(
+        "The red dot shows where MacroSense predicts "
+        "the indicator will be in 6 months. The blue "
+        "line shows where it has been historically."
+    )
+
     target_choice = st.selectbox(
-        "Select indicator",
-        ["GDP Growth",
+        "Select indicator for detailed view",
+        ["GDP Growth Rate",
          "Inflation Rate",
          "Unemployment Rate"]
     )
-    
-    wf_map = {
-        "GDP Growth"       : 'target_GDP',
-        "Inflation Rate"   : 'target_Inflation',
-        "Unemployment Rate": 'target_Unemployment'
+
+    target_map = {
+        "GDP Growth Rate"   : 'target_GDP',
+        "Inflation Rate"    : 'target_Inflation',
+        "Unemployment Rate" : 'target_Unemployment'
     }
-    
-    selected = wf_map[target_choice]
-    
-    try:
-        wf_data = pd.read_csv(
-            'outputs/walkforward_results.csv',
-            index_col=0,
-            parse_dates=True
+
+    feat_map = {
+        "GDP Growth Rate"   : 'GDP_growth',
+        "Inflation Rate"    : 'Inflation_yoy',
+        "Unemployment Rate" : 'Unemployment'
+    }
+
+    selected_target = target_map[target_choice]
+    selected_feat   = feat_map[target_choice]
+
+    if selected_feat in fe_clean.columns:
+
+        # Show last 5 years of history
+        historical = fe_clean[selected_feat].iloc[-60:]
+
+        fig, ax = plt.subplots(figsize=(12, 4))
+
+        add_recession_shading(
+            ax, recession,
+            historical.index[0],
+            historical.index[-1]
         )
-        
-        actual_col    = f'{selected}_Actual'
-        predicted_col = f'{selected}_Predicted'
-        error_col     = f'{selected}_Error'
-        
-        if actual_col in wf_data.columns:
-            
-            fig, axes = plt.subplots(
-                2, 1, figsize=(12, 8)
-            )
-            
-            # Actual vs Predicted
-            add_recession_shading(
-                axes[0], recession,
-                wf_data.index[0],
-                wf_data.index[-1]
-            )
-            
-            axes[0].plot(
-                wf_data.index,
-                wf_data[actual_col],
-                label='Actual',
+
+        ax.plot(historical.index,
+                historical.values,
                 color='steelblue',
-                linewidth=1.8
-            )
-            axes[0].plot(
-                wf_data.index,
-                wf_data[predicted_col],
-                label='MacroSense Forecast',
+                linewidth=1.8,
+                label='Historical')
+
+        if selected_target in forecasts:
+            ax.scatter(
+                [forecast_date],
+                [forecasts[selected_target]],
                 color='crimson',
-                linewidth=1.5,
-                linestyle='--'
+                s=150,
+                zorder=5,
+                label=(
+                    f"MacroSense Forecast "
+                    f"({forecast_date.strftime('%b %Y')})"
+                )
             )
-            axes[0].axhline(
-                0, color='black',
-                linewidth=0.8, alpha=0.4
+            ax.axvline(
+                latest_date,
+                color='grey',
+                linewidth=1,
+                linestyle='--',
+                alpha=0.7,
+                label='Latest data point'
             )
-            axes[0].set_title(
-                f'Actual vs Predicted -- {target_choice}',
-                fontweight='bold'
-            )
-            axes[0].set_ylabel(f'{target_choice} (%)')
-            axes[0].legend(fontsize=9)
-            axes[0].grid(alpha=0.3)
-            
-            # Error over time
-            errors = wf_data[error_col]
-            colors = ['crimson' if e < 0 else 'steelblue'
-                      for e in errors]
-            
-            axes[1].bar(
-                wf_data.index, errors,
-                color=colors, alpha=0.6, width=20
-            )
-            axes[1].axhline(
-                0, color='black', linewidth=0.8
-            )
-            axes[1].set_title(
-                'Forecast Error Over Time',
-                fontweight='bold'
-            )
-            axes[1].set_ylabel('Error (Actual minus Predicted)')
-            axes[1].set_xlabel('Date')
-            axes[1].grid(alpha=0.3)
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            
-        else:
-            st.info(
-                "Walk forward results use a flat column "
-                "structure. Displaying available data."
-            )
-            st.dataframe(wf_data.head(20))
-            
-    except Exception as e:
-        st.warning(
-            f"Walk forward results file could not be "
-            f"loaded in expected format. "
-            f"Please check outputs/walkforward_results.csv"
+
+        ax.set_title(
+            f'{target_choice} -- '
+            f'Last 5 Years and 6-Month Forecast',
+            fontweight='bold'
         )
-    
+        ax.set_ylabel(f'{target_choice} (%)')
+        ax.set_xlabel('Date')
+        ax.legend(fontsize=9)
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+
+        st.pyplot(fig)
+
     st.markdown("---")
-    
-    st.subheader("What Walk Forward Validation Means")
-    st.info("""
-    Unlike a simple train test split where the model trains 
-    once and tests once, walk forward validation retrains 
-    the model hundreds of times -- each time adding one more 
-    month of real data before making the next forecast.
-    
-    This simulates exactly how MacroSense would operate in 
-    real deployment. Every month when new FRED data is 
-    released the model would retrain and generate a fresh 
-    6-month forecast. Walk forward validation proves this 
-    approach works consistently across decades of economic 
-    history -- not just on one convenient test period.
-    
-    The drop in accuracy during recessions (from ~90% to 70% 
-    for GDP) is expected and honest. Sudden economic shocks 
-    are inherently harder to predict than normal economic 
-    conditions. Any model claiming perfect accuracy during 
-    recessions should be treated with serious skepticism.
-    """)
+    st.warning(
+        "MacroSense forecasts are generated by machine "
+        "learning models trained on historical data. "
+        "They are one input into economic analysis -- "
+        "not definitive predictions. Economic conditions "
+        "can change rapidly due to unforeseen events "
+        "that no historical model can anticipate. "
+        "Always combine quantitative forecasts with "
+        "qualitative judgment and domain expertise."
+    )
+
 
 # ------------------------------------------------
-# PAGE 5 -- ABOUT THIS PROJECT
+# SECTION 11: PAGE 4 -- WALK FORWARD VALIDATION
+# Displays when user selects Walk Forward
+# Shows pre-computed validation results
+# explaining how the system was tested
 # ------------------------------------------------
-elif page == "About This Project":
-    
-    st.title("📋 About MacroSense")
-    
+
+elif page == "Walk Forward Validation":
+
+    st.title("🔄 Walk Forward Validation")
+
     st.markdown("""
-    MacroSense is an end-to-end machine learning system 
-    built to forecast US economic conditions 6 months 
-    ahead using publicly available Federal Reserve data.
+    Walk forward validation simulated MacroSense
+    running live from the late 1990s onward.
+    Every month a forecast was made using only
+    data genuinely available at that moment.
+    The model retrained each month on all
+    available history before making the next
+    forecast -- exactly how a live deployed
+    system would operate.
     """)
-    
+
     st.markdown("---")
-    
+
+    # Performance metrics
+    st.subheader("Overall Performance")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("GDP Direction Accuracy",
+                "88.9%",
+                "vs 50% random baseline")
+    col2.metric("Inflation Direction Accuracy",
+                "96.2%",
+                "vs 50% random baseline")
+    col3.metric("Unemployment Direction Accuracy",
+                "100.0%",
+                "vs 50% random baseline")
+
+    st.caption(
+        "Direction accuracy measures how often "
+        "MacroSense correctly predicted whether each "
+        "indicator would move up or down over the "
+        "following 6 months."
+    )
+
+    st.markdown("---")
+
+    # Breakdown table
+    st.subheader("Performance Breakdown")
+
+    breakdown = pd.DataFrame({
+        'Indicator'        : [
+            'GDP Growth',
+            'Inflation Rate',
+            'Unemployment Rate'
+        ],
+        'Overall'          : [
+            '88.9%', '96.2%', '100.0%'
+        ],
+        'During Recessions': [
+            '70.0%', '70.0%', '100.0%'
+        ],
+        'Normal Periods'   : [
+            '90.5%', '98.3%', '100.0%'
+        ],
+        'Pre 2010'         : [
+            '88.9%', '91.7%', '100.0%'
+        ],
+        'Post 2010'        : [
+            '88.9%', '97.9%', '100.0%'
+        ]
+    })
+
+    st.dataframe(breakdown,
+                  use_container_width=True)
+
+    st.markdown("---")
+
+    # Explanation of what walk forward means
+    st.subheader(
+        "Why Walk Forward Validation Matters"
+    )
+
+    st.info("""
+    A simple train-test split gives one evaluation
+    score that may not reflect consistent real-world
+    performance. Walk forward validation generates
+    hundreds of evaluation scores -- one for every
+    month tested -- across stable periods,
+    pre-recession periods, crisis periods, and
+    recoveries. This gives a far more honest picture
+    of how the system would actually perform
+    in live deployment.
+
+    The drop in accuracy during recessions -- from
+    roughly 90% to 70% for GDP -- is expected and
+    honest. Sudden economic shocks are inherently
+    harder to predict than normal conditions.
+    Any model claiming perfect accuracy during
+    recessions should be treated with serious
+    skepticism.
+    """)
+
+    st.markdown("---")
+
+    # Note about charts
+    st.subheader("Validation Charts")
+    st.markdown(
+        "The full walk forward charts showing actual "
+        "versus predicted values across decades of "
+        "economic history are available in the project "
+        "notebooks on GitHub. The charts folder in the "
+        "repository contains all saved visualisations "
+        "from the complete validation run."
+    )
+
+    col1, col2 = st.columns(2)
+    col1.markdown(
+        "**GitHub Repository**\n\n"
+        "View complete notebooks and charts"
+    )
+    col2.markdown(
+        "**Notebook 06**\n\n"
+        "06_walk_forward.ipynb contains the "
+        "full validation code and results"
+    )
+
+# ------------------------------------------------
+# SECTION 12: PAGE 5 -- ABOUT THIS PROJECT
+# Displays when user selects About This Project
+# Documents methodology, data, and limitations
+# ------------------------------------------------
+
+elif page == "About This Project":
+
+    st.title("📋 About MacroSense")
+
+    st.markdown("""
+    MacroSense is an end-to-end machine learning
+    system built to forecast US economic conditions
+    6 months ahead using publicly available
+    Federal Reserve data.
+    """)
+
+    st.markdown("---")
+
     st.subheader("The Problem")
     st.markdown("""
-    Most organisations -- banks, companies, government 
-    ministries -- make economic decisions reactively. 
-    They respond to what the economy did last quarter 
-    rather than preparing for what it will do next. 
-    MacroSense addresses this by providing a systematic, 
-    data-driven early warning system built entirely from 
+    Most organisations make economic decisions
+    reactively. They respond to what the economy
+    did last quarter rather than preparing for
+    what it will do next. MacroSense addresses
+    this by providing a systematic data-driven
+    early warning system built entirely from
     public Federal Reserve data.
     """)
-    
+
     st.markdown("---")
-    
+
     st.subheader("Data Sources")
-    
+
     data_dict = pd.DataFrame({
-        'Variable'    : ['GDP', 'CPI', 'Unemployment',
-                         'Fed Funds Rate', 'Money Supply M2',
-                         'Yield Curve', 'Industrial Production',
-                         'Retail Sales', 'Consumer Sentiment',
-                         'Jobless Claims'],
-        'FRED Code'   : ['GDPC1', 'CPIAUCSL', 'UNRATE',
-                         'FEDFUNDS', 'M2SL', 'T10Y2Y',
-                         'INDPRO', 'RSAFS', 'UMCSENT', 'ICSA'],
-        'Type'        : ['Target', 'Target', 'Target',
-                         'Input', 'Input', 'Input',
-                         'Input', 'Input', 'Input', 'Input'],
-        'Coverage'    : ['1947-present', '1947-present',
-                         '1948-present', '1954-present',
-                         '1959-present', '1976-present',
-                         '1919-present', '1992-present',
-                         '1952-present', '1967-present']
+        'Variable'   : [
+            'GDP', 'CPI', 'Unemployment',
+            'Fed Funds Rate', 'Money Supply M2',
+            'Yield Curve', 'Industrial Production',
+            'Retail Sales', 'Consumer Sentiment',
+            'Jobless Claims'
+        ],
+        'FRED Code'  : [
+            'GDPC1', 'CPIAUCSL', 'UNRATE',
+            'FEDFUNDS', 'M2SL', 'T10Y2Y',
+            'INDPRO', 'RSAFS', 'UMCSENT', 'ICSA'
+        ],
+        'Type'       : [
+            'Target', 'Target', 'Target',
+            'Input', 'Input', 'Input',
+            'Input', 'Input', 'Input', 'Input'
+        ]
     })
-    
-    st.dataframe(data_dict, use_container_width=True)
-    
+
+    st.dataframe(data_dict,
+                  use_container_width=True)
+
     st.markdown("---")
-    
+
     st.subheader("Methodology")
-    
+
     col1, col2 = st.columns(2)
-    
+
     col1.markdown("""
     **Feature Engineering**
     - Level variables transformed to growth rates
     - Lag features at 1, 3, 6, and 12 months
     - Yield curve inversion binary flag
-    - Rate of change features for key indicators
     - Target variables shifted 6 months forward
+    - Chronological 80/20 train-test split
     """)
-    
+
     col2.markdown("""
     **Models Built**
     - Linear Regression (baseline)
@@ -767,40 +939,61 @@ elif page == "About This Project":
     - XGBoost (300 trees, primary model)
     - Ensemble (average of all four)
     """)
-    
+
     st.markdown("---")
-    
-    st.subheader("Honest Limitations")
-    
-    st.warning("""
-    **What MacroSense cannot do:**
-    
-    1. Predict sudden unpredictable shocks like pandemics, 
-       wars, or financial crises driven by novel mechanisms 
-       not present in historical data.
-    
-    2. Account for structural breaks -- when the economy 
-       behaves fundamentally differently from its 
-       historical patterns.
-    
-    3. Replace domain expertise and qualitative judgment. 
-       MacroSense is one input into economic analysis, 
-       not a substitute for it.
-    
-    4. Automatically update in real time. The system 
-       requires manual retraining when new FRED data 
-       is released each month.
-    
-    5. Generalise to other countries without retraining 
-       on country-specific data.
+
+    st.subheader("Key Findings")
+
+    st.markdown("""
+    The yield curve spread is the single most
+    powerful predictor in the dataset. It inverted
+    before the 2001 Dot-com recession, the 2008
+    Financial Crisis, and again starting in 2023.
+    Every major US recession since 1976 was preceded
+    by yield curve inversion.
+
+    Consumer sentiment leads economic downturns.
+    It declined before official recession dates
+    in 2001 and 2008 -- consumers sensed trouble
+    before economists confirmed it.
+
+    Unemployment is a lagging indicator. It only
+    rises after a recession has already begun
+    making jobless claims -- which react within
+    weeks -- more useful for early warning.
     """)
-    
+
     st.markdown("---")
-    
+
+    st.subheader("Honest Limitations")
+
+    st.warning("""
+    1. Novel shocks -- no model trained on historical
+       patterns can predict unprecedented events like
+       pandemics or novel financial crises
+
+    2. US-centric -- the system uses US data only
+       and does not generalise to other economies
+       without retraining
+
+    3. Structural breaks -- if the economy behaves
+       fundamentally differently from historical
+       patterns model performance will degrade
+
+    4. Unemployment accuracy -- the 100% direction
+       accuracy reflects series persistence rather
+       than extraordinary predictive power
+
+    5. Not financial advice -- MacroSense is for
+       research and educational purposes only
+    """)
+
+    st.markdown("---")
+
     st.subheader("Technical Stack")
-    
+
     col1, col2, col3 = st.columns(3)
-    
+
     col1.markdown("""
     **Data**
     - Python 3.13
@@ -808,7 +1001,7 @@ elif page == "About This Project":
     - FRED API
     - fredapi
     """)
-    
+
     col2.markdown("""
     **Modelling**
     - scikit-learn
@@ -816,7 +1009,7 @@ elif page == "About This Project":
     - statsmodels
     - SHAP
     """)
-    
+
     col3.markdown("""
     **Deployment**
     - Streamlit
@@ -824,23 +1017,28 @@ elif page == "About This Project":
     - matplotlib
     - python-dotenv
     """)
-    
+
     st.markdown("---")
-    
+
     st.subheader("Built By")
     st.markdown("""
-    This project was built as a portfolio demonstration 
-    of applied machine learning in macroeconomic 
-    forecasting. It combines an economics background 
-    with machine learning engineering to produce a 
-    system that is both technically rigorous and 
+    This project was built as a portfolio
+    demonstration of applied machine learning
+    in macroeconomic forecasting. It combines
+    economics domain knowledge with machine
+    learning engineering to produce a system
+    that is both technically rigorous and
     economically interpretable.
-    
-    The complete source code, notebooks, and 
+
+    The complete source code, notebooks, and
     documentation are available on GitHub.
     """)
-    
+
     st.caption(
         "MacroSense is for research and educational "
         "purposes only. Not financial advice."
     )
+
+# ------------------------------------------------
+# END OF APP
+# ------------------------------------------------
