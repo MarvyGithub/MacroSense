@@ -15,9 +15,24 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import joblib
 import os
+from dotenv import load_dotenv
 import warnings
 
 warnings.filterwarnings('ignore')
+
+
+app_dir  = os.path.dirname(os.path.abspath(__file__))
+env_path = os.path.join(app_dir, '.env')
+
+st.write(f"Looking for .env at: {env_path}")
+st.write(f"File exists: {os.path.exists(env_path)}")
+
+load_dotenv(dotenv_path=env_path)
+key = os.getenv('FRED_API_KEY')
+
+st.write(f"Key found: {key is not None}")
+if key:
+    st.write(f"Key starts with: {key[:8]}...")
 
 from xgboost import XGBRegressor
 from fredapi import Fred
