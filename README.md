@@ -214,5 +214,5 @@ Economics graduate applying machine learning to macroeconomic forecasting.
 This project combines domain knowledge from economics
 training with ML engineering to produce a system that
 is both technically rigorous and economically interpretable.
-Connect on LinkedIn: [linkedin.com/in/gideon-marvelous-5a19b919b]
+Connect on LinkedIn: [www.linkedin.com/in/gideon-marvelous]
 
