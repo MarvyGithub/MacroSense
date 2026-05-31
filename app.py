@@ -16,6 +16,7 @@ import matplotlib.patches as mpatches
 import joblib
 import os
 from dotenv import load_dotenv
+import time
 import warnings
 
 warnings.filterwarnings('ignore')
