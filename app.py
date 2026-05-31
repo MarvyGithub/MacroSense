@@ -111,14 +111,23 @@ def generate_raw_data():
 
     # Download all 10 series
     gdp          = fred.get_series('GDPC1')
+    time.sleep(0.5)
     cpi          = fred.get_series('CPIAUCSL')
+    time.sleep(0.5)
     unemployment = fred.get_series('UNRATE')
+    time.sleep(0.5)
     fedfunds     = fred.get_series('FEDFUNDS')
+    time.sleep(0.5)
     m2           = fred.get_series('M2SL')
+    time.sleep(0.5)
     yieldcurve   = fred.get_series('T10Y2Y')
+    time.sleep(0.5)
     indpro       = fred.get_series('INDPRO')
+    time.sleep(0.5)
     retailsales  = fred.get_series('RSAFS')
+    time.sleep(0.5)
     sentiment    = fred.get_series('UMCSENT')
+    time.sleep(0.5)
     claims       = fred.get_series('ICSA')
 
     # Combine into one master table
