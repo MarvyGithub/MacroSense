@@ -1039,10 +1039,10 @@ elif page == "About This Project":
 
     st.markdown("---")
 
-    st.subheader("Built By")
+    st.subheader("Built By an Economist with strong interest in Applied Machine Learning")
 
     st.markdown("""
-    Aremu Gideon Marvelous
+    
     
     I am an Economics graduate with a strong interest in 
     applying machine learning to real-world economic and 
@@ -1065,16 +1065,10 @@ elif page == "About This Project":
     
     col1, col2 = st.columns(2)
     
-    col1.markdown("""
-    **Connect With Me**
-    - LinkedIn: [Aremu Gideon Marvelous](https://www.linkedin.com/in/gideon-marvelous-5a19b919b?utm_source=share_via&utm_content=profile&utm_medium=member_android)
-    - GitHub: [Marvy](https://github.com/MarvyGithub)
-    - Email: aremumarvelous@gmail.com
-    """)
     
     col2.markdown("""
     **Background**
-    - BSc Economics -- University of Ilorin, Ilorin, Nigeria
+    - BSc Economics
     - Masters in Statistics -- Incoming
     - Interests: Macroeconomic forecasting, 
       financial ML, time series analysis, Deep Learning, AI
